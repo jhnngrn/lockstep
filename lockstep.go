@@ -134,10 +134,12 @@ func (l *Link) sendPending() {
 	response, tsRejected, err := l.send(l.peer, tx)
 	if err != nil {
 		l.Pending = nil
+		l.persist()
 		return
 	}
 	if tsRejected {
 		l.Pending = nil
+		l.persist()
 		return
 	}
 
