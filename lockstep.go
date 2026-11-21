@@ -133,9 +133,7 @@ func (l *Link) sendPending() {
 
 	response, tsRejected, err := l.send(l.peer, tx)
 	if err != nil {
-		l.Pending = nil
-		l.persist()
-		return
+		return // transport error — Pending survives for retry
 	}
 	if tsRejected {
 		l.Pending = nil
