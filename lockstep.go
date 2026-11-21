@@ -184,9 +184,13 @@ func (l *Link) sendPending() {
 		return
 	}
 	if tsRejected {
-		l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
-		l.persist()
-		l.sendPending()
+		time.AfterFunc(RetryInterval, func() {
+			l.ops <- func() {
+				l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
+				l.persist()
+				l.sendPending()
+			}
+		})
 		return
 	}
 
