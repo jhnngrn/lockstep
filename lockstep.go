@@ -178,6 +178,12 @@ func (l *Link) sendPending() {
 		return
 	}
 
+	// State may have changed while mu was released — a Receive
+	// could have won a collision and cleared our Pending.
+	if l.Pending == nil || l.Counter != tx.Counter {
+		return
+	}
+
 	if err != nil {
 		// Transport error — Pending survives with same timestamp.
 		l.scheduleRetry()
