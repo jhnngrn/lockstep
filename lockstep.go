@@ -142,8 +142,8 @@ func (l *Link) sendPending() {
 		return
 	}
 	if tsRejected {
-		l.Pending = nil
-		l.persist()
+		l.Pending.Timestamp = maxTS(timeNow(), l.Pending.Timestamp)
+		l.sendPending()
 		return
 	}
 
