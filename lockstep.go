@@ -160,15 +160,13 @@ func (l *Link) tryNextTx() {
 	}
 
 	l.Pending = &PendingTx{Payload: payload, QueuedAt: queuedAt}
+	l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
+	l.persist()
 	l.sendPending()
 }
 
 // sendPending sends the current in-flight message.
-// Updates timestamp and persists before each attempt.
 func (l *Link) sendPending() {
-	l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
-	l.persist()
-
 	tx := Tx{
 		From:      l.self,
 		To:        l.peer,
@@ -179,13 +177,15 @@ func (l *Link) sendPending() {
 
 	response, tsRejected, err := l.send(l.peer, tx)
 	if err != nil {
-		// Transport error — Pending survives. Retry after interval.
+		// Transport error — Pending survives with same timestamp.
 		time.AfterFunc(RetryInterval, func() {
 			l.ops <- func() { l.sendPending() }
 		})
 		return
 	}
 	if tsRejected {
+		l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
+		l.persist()
 		l.sendPending()
 		return
 	}
