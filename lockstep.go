@@ -122,11 +122,8 @@ func (l *Link) Close() {
 	close(l.ops)
 }
 
-// Peer returns the peer's identity.
-func (l *Link) Peer() string { return l.peer }
-
-// Dominant reports whether this side owns the current counter slot.
-func (l *Link) Dominant() bool {
+// dominant reports whether this side owns the current counter slot.
+func (l *Link) dominant() bool {
 	return l.Counter%2 == l.turnBit
 }
 
@@ -235,7 +232,7 @@ func (l *Link) ValidateCounter(counter uint64) (cached *CachedResponse, err erro
 		return nil, fmt.Errorf("counter ahead: got %d, at %d", counter, l.Counter)
 	}
 	// Collision: both sides acting at the same counter.
-	if l.Pending != nil && l.Dominant() {
+	if l.Pending != nil && l.dominant() {
 		return nil, fmt.Errorf("collision: our pending wins")
 	}
 	return nil, nil
