@@ -116,6 +116,11 @@ func NewLink(self, peer string, h Handler, send SendFunc, persist func()) *Link 
 func (l *Link) run() {
 	for {
 		select {
+		case <-l.done:
+			return
+		default:
+		}
+		select {
 		case op := <-l.ops:
 			op()
 		case <-l.done:
