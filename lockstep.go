@@ -20,6 +20,9 @@ import (
 // MaxTimestampDrift is the maximum allowed clock difference (10 minutes).
 const MaxTimestampDrift = 10 * 60
 
+// RetryInterval is the delay between send retries on transport error.
+var RetryInterval = time.Minute
+
 // timeNow returns the current unix timestamp. Replaceable in tests.
 var timeNow = func() int64 { return time.Now().Unix() }
 
@@ -86,12 +89,12 @@ func NewLink(self, peer string, h Handler, send SendFunc, persist func()) *Link 
 		bit = 1
 	}
 	return &Link{
-		self:    self,
-		peer:    peer,
-		turnBit: bit,
+		self:          self,
+		peer:          peer,
+		turnBit:       bit,
 		handler: h,
-		send:    send,
-		persist: persist,
+		send:          send,
+		persist:       persist,
 	}
 }
 
@@ -133,7 +136,11 @@ func (l *Link) sendPending() {
 
 	response, tsRejected, err := l.send(l.peer, tx)
 	if err != nil {
-		return // transport error — Pending survives for retry
+		// Transport error — Pending survives. Retry after interval.
+		time.AfterFunc(RetryInterval, func() {
+			l.sendPending()
+		})
+		return
 	}
 	if tsRejected {
 		l.Pending = nil
