@@ -6,7 +6,7 @@
 // deterministic turn bit derived from lexicographic key order.
 //
 // Each Link runs on its own goroutine. All operations are serialized
-// through a command channel — no mutex needed. Call the public methods
+// through typed channels — no mutex needed. Call the public methods
 // from any goroutine; they dispatch to the owning goroutine.
 package lockstep
 
@@ -66,6 +66,12 @@ type Handler interface {
 // tsRejected=true means the receiver rejected the timestamp (retry).
 type SendFunc func(peer string, tx Tx) (response byte, tsRejected bool, err error)
 
+// receiveOp carries an incoming Tx and a channel for the result.
+type receiveOp struct {
+	tx     Tx
+	result chan<- receiveResult
+}
+
 // receiveResult is sent back through Receive's response channel.
 type receiveResult struct {
 	response   byte
@@ -88,8 +94,11 @@ type Link struct {
 	handler Handler
 	send    SendFunc
 	persist func()
-	ops     chan func()
-	done    chan struct{}
+
+	tryCh     chan struct{}
+	receiveCh chan receiveOp
+	retryCh   chan uint64 // carries counter at time of scheduling
+	done      chan struct{}
 }
 
 // NewLink creates a lockstep link and starts its goroutine.
@@ -99,14 +108,16 @@ func NewLink(self, peer string, h Handler, send SendFunc, persist func()) *Link 
 		bit = 1
 	}
 	l := &Link{
-		self:    self,
-		peer:    peer,
-		turnBit: bit,
-		handler: h,
-		send:    send,
-		persist: persist,
-		ops:  make(chan func(), 16),
-		done: make(chan struct{}),
+		self:      self,
+		peer:      peer,
+		turnBit:   bit,
+		handler:   h,
+		send:      send,
+		persist:   persist,
+		tryCh:     make(chan struct{}, 1),
+		receiveCh: make(chan receiveOp),
+		retryCh:   make(chan uint64, 1),
+		done:      make(chan struct{}),
 	}
 	go l.run()
 	return l
@@ -121,8 +132,15 @@ func (l *Link) run() {
 		default:
 		}
 		select {
-		case op := <-l.ops:
-			op()
+		case <-l.tryCh:
+			l.tryNextTx()
+		case op := <-l.receiveCh:
+			r, ts, e := l.receive(op.tx)
+			op.result <- receiveResult{r, ts, e}
+		case counter := <-l.retryCh:
+			if l.Counter == counter {
+				l.sendPending()
+			}
 		case <-l.done:
 			return
 		}
@@ -139,19 +157,19 @@ func (l *Link) dominant() bool {
 	return l.Counter%2 == l.turnBit
 }
 
-// TryNextTx dispatches a send attempt to the Link's goroutine.
+// TryNextTx signals the Link to try sending the next queued transaction.
 func (l *Link) TryNextTx() {
-	l.ops <- func() { l.tryNextTx() }
+	select {
+	case l.tryCh <- struct{}{}:
+	default: // already signaled
+	}
 }
 
 // Receive dispatches an incoming transaction to the Link's goroutine.
 // Blocks until processed and returns the result.
 func (l *Link) Receive(tx Tx) (response byte, tsRejected bool, err error) {
 	ch := make(chan receiveResult, 1)
-	l.ops <- func() {
-		r, ts, e := l.receive(tx)
-		ch <- receiveResult{r, ts, e}
-	}
+	l.receiveCh <- receiveOp{tx: tx, result: ch}
 	res := <-ch
 	return res.response, res.tsRejected, res.err
 }
@@ -187,41 +205,30 @@ func (l *Link) sendPending() {
 	response, tsRejected, err := l.send(l.peer, tx)
 	if err != nil {
 		// Transport error — Pending survives with same timestamp.
-		counter := l.Counter
-		time.AfterFunc(RetryInterval, func() {
-			select {
-			case l.ops <- func() {
-				if l.Counter != counter {
-					return
-				}
-				l.sendPending()
-			}:
-			case <-l.done:
-			}
-		})
+		l.scheduleRetry()
 		return
 	}
 	if tsRejected {
-		counter := l.Counter
-		time.AfterFunc(RetryInterval, func() {
-			select {
-			case l.ops <- func() {
-				if l.Counter != counter {
-					return
-				}
-				l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
-				l.persist()
-				l.sendPending()
-			}:
-			case <-l.done:
-			}
-		})
+		l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
+		l.persist()
+		l.scheduleRetry()
 		return
 	}
 
 	l.handler.HandleResponse(l.peer, l.Pending.Payload, response)
 	l.AcceptResponse()
 	l.tryNextTx()
+}
+
+// scheduleRetry schedules a retry of sendPending after RetryInterval.
+func (l *Link) scheduleRetry() {
+	counter := l.Counter
+	time.AfterFunc(RetryInterval, func() {
+		select {
+		case l.retryCh <- counter:
+		case <-l.done:
+		}
+	})
 }
 
 func (l *Link) receive(tx Tx) (response byte, tsRejected bool, err error) {
