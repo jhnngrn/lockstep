@@ -89,6 +89,7 @@ type Link struct {
 	send    SendFunc
 	persist func()
 	ops     chan func()
+	done    chan struct{}
 }
 
 // NewLink creates a lockstep link and starts its goroutine.
@@ -104,7 +105,8 @@ func NewLink(self, peer string, h Handler, send SendFunc, persist func()) *Link 
 		handler: h,
 		send:    send,
 		persist: persist,
-		ops:     make(chan func(), 16),
+		ops:  make(chan func(), 16),
+		done: make(chan struct{}),
 	}
 	go l.run()
 	return l
@@ -119,6 +121,7 @@ func (l *Link) run() {
 
 // Close shuts down the Link's goroutine.
 func (l *Link) Close() {
+	close(l.done)
 	close(l.ops)
 }
 
@@ -177,11 +180,14 @@ func (l *Link) sendPending() {
 		// Transport error — Pending survives with same timestamp.
 		counter := l.Counter
 		time.AfterFunc(RetryInterval, func() {
-			l.ops <- func() {
+			select {
+			case l.ops <- func() {
 				if l.Counter != counter {
-					return // stale retry
+					return
 				}
 				l.sendPending()
+			}:
+			case <-l.done:
 			}
 		})
 		return
@@ -189,13 +195,16 @@ func (l *Link) sendPending() {
 	if tsRejected {
 		counter := l.Counter
 		time.AfterFunc(RetryInterval, func() {
-			l.ops <- func() {
+			select {
+			case l.ops <- func() {
 				if l.Counter != counter {
 					return
 				}
 				l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
 				l.persist()
 				l.sendPending()
+			}:
+			case <-l.done:
 			}
 		})
 		return
