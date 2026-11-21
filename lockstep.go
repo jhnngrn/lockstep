@@ -5,9 +5,9 @@
 // Collision (both sides act at the same counter) is resolved by a
 // deterministic turn bit derived from lexicographic key order.
 //
-// The Link drives the send loop itself: call TryNextTx after queuing work,
-// and lockstep pulls the next message via Handler.NextTx, sends it,
-// processes the response, and kicks again until the queue is empty.
+// Each Link runs on its own goroutine. All operations are serialized
+// through a command channel — no mutex needed. Call the public methods
+// from any goroutine; they dispatch to the owning goroutine.
 package lockstep
 
 import (
@@ -66,7 +66,15 @@ type Handler interface {
 // tsRejected=true means the receiver rejected the timestamp (retry).
 type SendFunc func(peer string, tx Tx) (response byte, tsRejected bool, err error)
 
+// receiveResult is sent back through Receive's response channel.
+type receiveResult struct {
+	response   byte
+	tsRejected bool
+	err        error
+}
+
 // Link is a bilateral lockstep connection between two peers.
+// All state access is serialized on the internal goroutine.
 type Link struct {
 	self    string
 	peer    string
@@ -80,22 +88,38 @@ type Link struct {
 	handler Handler
 	send    SendFunc
 	persist func()
+	ops     chan func()
 }
 
-// NewLink creates a lockstep link to a peer.
+// NewLink creates a lockstep link and starts its goroutine.
 func NewLink(self, peer string, h Handler, send SendFunc, persist func()) *Link {
 	var bit uint64
 	if self > peer {
 		bit = 1
 	}
-	return &Link{
-		self:          self,
-		peer:          peer,
-		turnBit:       bit,
+	l := &Link{
+		self:    self,
+		peer:    peer,
+		turnBit: bit,
 		handler: h,
-		send:          send,
-		persist:       persist,
+		send:    send,
+		persist: persist,
+		ops:     make(chan func(), 16),
 	}
+	go l.run()
+	return l
+}
+
+// run is the Link's owning goroutine. All state access happens here.
+func (l *Link) run() {
+	for op := range l.ops {
+		op()
+	}
+}
+
+// Close shuts down the Link's goroutine.
+func (l *Link) Close() {
+	close(l.ops)
 }
 
 // Peer returns the peer's identity.
@@ -106,9 +130,26 @@ func (l *Link) Dominant() bool {
 	return l.Counter%2 == l.turnBit
 }
 
-// TryNextTx pulls the next transaction from the handler and sends it.
-// Call after queuing work in the handler.
+// TryNextTx dispatches a send attempt to the Link's goroutine.
 func (l *Link) TryNextTx() {
+	l.ops <- func() { l.tryNextTx() }
+}
+
+// Receive dispatches an incoming transaction to the Link's goroutine.
+// Blocks until processed and returns the result.
+func (l *Link) Receive(tx Tx) (response byte, tsRejected bool, err error) {
+	ch := make(chan receiveResult, 1)
+	l.ops <- func() {
+		r, ts, e := l.receive(tx)
+		ch <- receiveResult{r, ts, e}
+	}
+	res := <-ch
+	return res.response, res.tsRejected, res.err
+}
+
+// --- Internal methods (run on the owning goroutine) ---
+
+func (l *Link) tryNextTx() {
 	if l.Counter == 0 || l.Pending != nil {
 		return
 	}
@@ -140,7 +181,7 @@ func (l *Link) sendPending() {
 	if err != nil {
 		// Transport error — Pending survives. Retry after interval.
 		time.AfterFunc(RetryInterval, func() {
-			l.sendPending()
+			l.ops <- func() { l.sendPending() }
 		})
 		return
 	}
@@ -151,12 +192,10 @@ func (l *Link) sendPending() {
 
 	l.handler.HandleResponse(l.peer, l.Pending.Payload, response)
 	l.AcceptResponse()
-	l.TryNextTx()
+	l.tryNextTx()
 }
 
-// Receive processes an incoming transaction.
-// Returns (response, tsRejected, err).
-func (l *Link) Receive(tx Tx) (response byte, tsRejected bool, err error) {
+func (l *Link) receive(tx Tx) (response byte, tsRejected bool, err error) {
 	// Validate counter.
 	if cached, err := l.ValidateCounter(tx.Counter); err != nil {
 		return 0, false, err
@@ -172,7 +211,7 @@ func (l *Link) Receive(tx Tx) (response byte, tsRejected bool, err error) {
 	// Dispatch to handler.
 	response = l.handler.HandleRequest(l.peer, tx.Payload, tx.Timestamp)
 	l.AcceptRequest(response, tx.Timestamp)
-	l.TryNextTx()
+	l.tryNextTx()
 
 	return response, false, nil
 }
@@ -241,4 +280,3 @@ func maxTS(a, b int64) int64 {
 	}
 	return b
 }
-
