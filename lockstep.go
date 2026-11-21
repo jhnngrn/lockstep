@@ -12,7 +12,6 @@ package lockstep
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 )
@@ -188,14 +187,14 @@ func (l *Link) ValidateCounter(counter uint64) (cached *CachedResponse, err erro
 		if l.CachedResponse != nil && counter == l.Counter-1 {
 			return l.CachedResponse, nil
 		}
-		return nil, errorf("stale counter: got %d, at %d", counter, l.Counter)
+		return nil, fmt.Errorf("stale counter: got %d, at %d", counter, l.Counter)
 	}
 	if counter > l.Counter {
-		return nil, errorf("counter ahead: got %d, at %d", counter, l.Counter)
+		return nil, fmt.Errorf("counter ahead: got %d, at %d", counter, l.Counter)
 	}
 	// Collision: both sides acting at the same counter.
 	if l.Pending != nil && l.Dominant() {
-		return nil, errorf("collision: our pending wins")
+		return nil, fmt.Errorf("collision: our pending wins")
 	}
 	return nil, nil
 }
@@ -242,6 +241,3 @@ func maxTS(a, b int64) int64 {
 	return b
 }
 
-func errorf(format string, args ...any) error {
-	return errors.New(fmt.Sprintf(format, args...))
-}
