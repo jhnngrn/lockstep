@@ -149,7 +149,6 @@ func (l *Link) sendPending() {
 
 	l.handler.HandleResponse(l.peer, l.Pending.Payload, response)
 	l.AcceptResponse()
-	l.persist()
 	l.TryNextTx()
 }
 
@@ -171,8 +170,6 @@ func (l *Link) Receive(tx Tx) (response byte, tsRejected bool, err error) {
 	// Dispatch to handler.
 	response = l.handler.HandleRequest(l.peer, tx.Payload, tx.Timestamp)
 	l.AcceptRequest(response, tx.Timestamp)
-
-	l.persist()
 	l.TryNextTx()
 
 	return response, false, nil
@@ -214,16 +211,17 @@ func (l *Link) ValidateTimestamp(ts int64) bool {
 
 // --- State transitions ---
 
-// AcceptRequest finalizes an incoming request.
+// AcceptRequest finalizes an incoming request and persists.
 // Clears Pending — if we had one, it lost the collision.
 func (l *Link) AcceptRequest(response byte, ts int64) {
 	l.CachedResponse = &CachedResponse{Response: response}
 	l.Counter++
 	l.Timestamp = ts
 	l.Pending = nil
+	l.persist()
 }
 
-// AcceptResponse finalizes a received response to our outgoing message.
+// AcceptResponse finalizes a received response and persists.
 func (l *Link) AcceptResponse() {
 	if l.Pending == nil {
 		return
@@ -232,6 +230,7 @@ func (l *Link) AcceptResponse() {
 	l.Counter++
 	l.Pending = nil
 	l.CachedResponse = nil
+	l.persist()
 }
 
 func maxTS(a, b int64) int64 {
