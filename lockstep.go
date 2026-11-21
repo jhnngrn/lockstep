@@ -114,15 +114,19 @@ func NewLink(self, peer string, h Handler, send SendFunc, persist func()) *Link 
 
 // run is the Link's owning goroutine. All state access happens here.
 func (l *Link) run() {
-	for op := range l.ops {
-		op()
+	for {
+		select {
+		case op := <-l.ops:
+			op()
+		case <-l.done:
+			return
+		}
 	}
 }
 
 // Close shuts down the Link's goroutine.
 func (l *Link) Close() {
 	close(l.done)
-	close(l.ops)
 }
 
 // dominant reports whether this side owns the current counter slot.
