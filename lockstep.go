@@ -164,6 +164,9 @@ func (l *Link) tryNextTx() {
 
 // sendPending sends the current in-flight message.
 func (l *Link) sendPending() {
+	if l.Pending == nil {
+		return // cleared by collision since retry was scheduled
+	}
 	tx := Tx{
 		From:      l.self,
 		To:        l.peer,
