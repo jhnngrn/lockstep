@@ -95,7 +95,7 @@ type Link struct {
 	send    SendFunc
 	persist func()
 
-	tryCh     chan struct{}
+	newTxCh   chan struct{}
 	receiveCh chan receiveOp
 	retryCh   chan uint64 // carries counter at time of scheduling
 	done      chan struct{}
@@ -114,7 +114,7 @@ func NewLink(self, peer string, h Handler, send SendFunc, persist func()) *Link 
 		handler:   h,
 		send:      send,
 		persist:   persist,
-		tryCh:     make(chan struct{}, 1),
+		newTxCh:   make(chan struct{}, 1),
 		receiveCh: make(chan receiveOp),
 		retryCh:   make(chan uint64, 1),
 		done:      make(chan struct{}),
@@ -132,7 +132,7 @@ func (l *Link) run() {
 		default:
 		}
 		select {
-		case <-l.tryCh:
+		case <-l.newTxCh:
 			l.tryNextTx()
 		case op := <-l.receiveCh:
 			r, ts, e := l.receive(op.tx)
@@ -157,10 +157,11 @@ func (l *Link) dominant() bool {
 	return l.Counter%2 == l.turnBit
 }
 
-// TryNextTx signals the Link to try sending the next queued transaction.
-func (l *Link) TryNextTx() {
+// NewPendingTx signals that new work has been queued and lockstep
+// should try sending.
+func (l *Link) NewPendingTx() {
 	select {
-	case l.tryCh <- struct{}{}:
+	case l.newTxCh <- struct{}{}:
 	default: // already signaled
 	}
 }
