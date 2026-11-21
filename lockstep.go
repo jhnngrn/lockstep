@@ -143,6 +143,7 @@ func (l *Link) sendPending() {
 
 	l.handler.HandleResponse(l.peer, l.Pending.Payload, response)
 	l.AcceptResponse()
+	l.persist()
 	l.TryNextTx()
 }
 
