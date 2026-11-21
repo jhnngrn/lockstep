@@ -5,14 +5,15 @@
 // Collision (both sides act at the same counter) is resolved by a
 // deterministic turn bit derived from lexicographic key order.
 //
-// Each Link runs on its own goroutine. All operations are serialized
-// through typed channels — no mutex needed. Call the public methods
-// from any goroutine; they dispatch to the owning goroutine.
+// All public methods are safe for concurrent use. State is protected
+// by a per-link mutex. The mutex is released during network sends
+// so other operations on the link are not blocked.
 package lockstep
 
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 )
 
@@ -66,22 +67,11 @@ type Handler interface {
 // tsRejected=true means the receiver rejected the timestamp (retry).
 type SendFunc func(peer string, tx Tx) (response byte, tsRejected bool, err error)
 
-// receiveOp carries an incoming Tx and a channel for the result.
-type receiveOp struct {
-	tx     Tx
-	result chan<- receiveResult
-}
-
-// receiveResult is sent back through Receive's response channel.
-type receiveResult struct {
-	response   byte
-	tsRejected bool
-	err        error
-}
-
 // Link is a bilateral lockstep connection between two peers.
-// All state access is serialized on the internal goroutine.
 type Link struct {
+	mu     sync.Mutex
+	closed bool
+
 	self    string
 	peer    string
 	Counter uint64 `json:"counter"` // 0 = pending connect, >= 1 = connected
@@ -94,62 +84,30 @@ type Link struct {
 	handler Handler
 	send    SendFunc
 	persist func()
-
-	newTxCh   chan struct{}
-	receiveCh chan receiveOp
-	retryCh   chan uint64 // carries counter at time of scheduling
-	done      chan struct{}
 }
 
-// NewLink creates a lockstep link and starts its goroutine.
+// NewLink creates a lockstep link to a peer.
 func NewLink(self, peer string, h Handler, send SendFunc, persist func()) *Link {
 	var bit uint64
 	if self > peer {
 		bit = 1
 	}
-	l := &Link{
-		self:      self,
-		peer:      peer,
-		turnBit:   bit,
-		handler:   h,
-		send:      send,
-		persist:   persist,
-		newTxCh:   make(chan struct{}, 1),
-		receiveCh: make(chan receiveOp),
-		retryCh:   make(chan uint64, 1),
-		done:      make(chan struct{}),
-	}
-	go l.run()
-	return l
-}
-
-// run is the Link's owning goroutine. All state access happens here.
-func (l *Link) run() {
-	for {
-		select {
-		case <-l.done:
-			return
-		default:
-		}
-		select {
-		case <-l.newTxCh:
-			l.tryNextTx()
-		case op := <-l.receiveCh:
-			r, ts, e := l.receive(op.tx)
-			op.result <- receiveResult{r, ts, e}
-		case counter := <-l.retryCh:
-			if l.Counter == counter {
-				l.sendPending()
-			}
-		case <-l.done:
-			return
-		}
+	return &Link{
+		self:    self,
+		peer:    peer,
+		turnBit: bit,
+		handler: h,
+		send:    send,
+		persist: persist,
 	}
 }
 
-// Close shuts down the Link's goroutine.
+// Close marks the link as closed. Ongoing sends will be discarded
+// when they return.
 func (l *Link) Close() {
-	close(l.done)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.closed = true
 }
 
 // dominant reports whether this side owns the current counter slot.
@@ -157,25 +115,33 @@ func (l *Link) dominant() bool {
 	return l.Counter%2 == l.turnBit
 }
 
-// NewPendingTx signals that new work has been queued and lockstep
-// should try sending.
+// NewPendingTx tries to send the next queued transaction.
 func (l *Link) NewPendingTx() {
-	select {
-	case l.newTxCh <- struct{}{}:
-	default: // already signaled
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return
 	}
+	l.tryNextTx()
+	// tryNextTx -> sendPending handles unlock/relock around send.
+	// After the chain completes, mu is held.
+	l.mu.Unlock()
 }
 
-// Receive dispatches an incoming transaction to the Link's goroutine.
-// Blocks until processed and returns the result.
+// Receive processes an incoming transaction.
+// Returns (response, tsRejected, err).
 func (l *Link) Receive(tx Tx) (response byte, tsRejected bool, err error) {
-	ch := make(chan receiveResult, 1)
-	l.receiveCh <- receiveOp{tx: tx, result: ch}
-	res := <-ch
-	return res.response, res.tsRejected, res.err
+	l.mu.Lock()
+	if l.closed {
+		l.mu.Unlock()
+		return 0, false, fmt.Errorf("link closed")
+	}
+	response, tsRejected, err = l.receive(tx)
+	l.mu.Unlock()
+	return
 }
 
-// --- Internal methods (run on the owning goroutine) ---
+// --- Internal methods (called with mu held) ---
 
 func (l *Link) tryNextTx() {
 	if l.Counter == 0 || l.Pending != nil {
@@ -194,6 +160,7 @@ func (l *Link) tryNextTx() {
 }
 
 // sendPending sends the current in-flight message.
+// Releases mu during the network send, retakes it after.
 func (l *Link) sendPending() {
 	tx := Tx{
 		From:      l.self,
@@ -203,7 +170,14 @@ func (l *Link) sendPending() {
 		Timestamp: l.Pending.Timestamp,
 	}
 
+	l.mu.Unlock()
 	response, tsRejected, err := l.send(l.peer, tx)
+	l.mu.Lock()
+
+	if l.closed {
+		return
+	}
+
 	if err != nil {
 		// Transport error — Pending survives with same timestamp.
 		l.scheduleRetry()
@@ -225,9 +199,13 @@ func (l *Link) sendPending() {
 func (l *Link) scheduleRetry() {
 	counter := l.Counter
 	time.AfterFunc(RetryInterval, func() {
-		select {
-		case l.retryCh <- counter:
-		case <-l.done:
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if l.closed {
+			return
+		}
+		if l.Counter == counter {
+			l.sendPending()
 		}
 	})
 }
