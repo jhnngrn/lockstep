@@ -164,9 +164,6 @@ func (l *Link) tryNextTx() {
 
 // sendPending sends the current in-flight message.
 func (l *Link) sendPending() {
-	if l.Pending == nil {
-		return // cleared by collision since retry was scheduled
-	}
 	tx := Tx{
 		From:      l.self,
 		To:        l.peer,
@@ -181,8 +178,8 @@ func (l *Link) sendPending() {
 		counter := l.Counter
 		time.AfterFunc(RetryInterval, func() {
 			l.ops <- func() {
-				if l.Pending == nil || l.Counter != counter {
-					return // collision happened, stale retry
+				if l.Counter != counter {
+					return // stale retry
 				}
 				l.sendPending()
 			}
@@ -193,7 +190,7 @@ func (l *Link) sendPending() {
 		counter := l.Counter
 		time.AfterFunc(RetryInterval, func() {
 			l.ops <- func() {
-				if l.Pending == nil || l.Counter != counter {
+				if l.Counter != counter {
 					return
 				}
 				l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
