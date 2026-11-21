@@ -178,14 +178,24 @@ func (l *Link) sendPending() {
 	response, tsRejected, err := l.send(l.peer, tx)
 	if err != nil {
 		// Transport error — Pending survives with same timestamp.
+		counter := l.Counter
 		time.AfterFunc(RetryInterval, func() {
-			l.ops <- func() { l.sendPending() }
+			l.ops <- func() {
+				if l.Pending == nil || l.Counter != counter {
+					return // collision happened, stale retry
+				}
+				l.sendPending()
+			}
 		})
 		return
 	}
 	if tsRejected {
+		counter := l.Counter
 		time.AfterFunc(RetryInterval, func() {
 			l.ops <- func() {
+				if l.Pending == nil || l.Counter != counter {
+					return
+				}
 				l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
 				l.persist()
 				l.sendPending()
