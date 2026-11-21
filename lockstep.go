@@ -38,6 +38,7 @@ type Tx struct {
 type PendingTx struct {
 	Payload   json.RawMessage `json:"payload"`
 	Timestamp int64           `json:"timestamp"`
+	QueuedAt  int64           `json:"queued_at"`
 }
 
 // CachedResponse stores the last response for replay on duplicate counter.
@@ -118,7 +119,7 @@ func (l *Link) TryNextTx() {
 	}
 
 	ts := maxTS(timeNow(), queuedAt)
-	l.Pending = &PendingTx{Payload: payload, Timestamp: ts}
+	l.Pending = &PendingTx{Payload: payload, Timestamp: ts, QueuedAt: queuedAt}
 	l.persist()
 	l.sendPending()
 }
@@ -142,7 +143,7 @@ func (l *Link) sendPending() {
 		return
 	}
 	if tsRejected {
-		l.Pending.Timestamp = maxTS(timeNow(), l.Pending.Timestamp)
+		l.Pending.Timestamp = maxTS(timeNow(), l.Pending.QueuedAt)
 		l.sendPending()
 		return
 	}
