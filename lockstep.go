@@ -117,6 +117,7 @@ func (l *Link) TryNextTx() {
 
 	ts := maxTS(timeNow(), queuedAt)
 	l.Pending = &PendingTx{Payload: payload, Timestamp: ts}
+	l.persist()
 	l.sendPending()
 }
 
